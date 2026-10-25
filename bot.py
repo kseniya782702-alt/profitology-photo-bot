@@ -1,108 +1,100 @@
-"""PROFITOLOGY ANALYTICS — Telegram crypto signal assistant (UA)."""
+"""PROFITOLOGY ANALYTICS: screenshot analysis for Pocket Option charts."""
+import asyncio
+import base64
 import logging
 import os
-from datetime import datetime, timezone
+from io import BytesIO
 
-import pandas as pd
 import requests
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger(__name__)
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-SYMBOLS = {'BTC/USDT': 'BTCUSDT', 'ETH/USDT': 'ETHUSDT', 'SOL/USDT': 'SOLUSDT', 'BNB/USDT': 'BNBUSDT'}
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+MODEL = os.environ.get('VISION_MODEL', 'gpt-4.1-mini')
+PROMPT = '''Проаналізуй надісланий скриншот торгового графіка Pocket Option українською.
+Поверни стислий звіт у форматі:
+📊 Актив: [назва або не видно]
+⏱ Таймфрейм: [або не видно]
+📈 Тренд: [висхідний/спадний/боковий/невизначений]
+🔎 Спостереження: [2-4 конкретні ознаки, які справді видно: свічки, середні, рівні, індикатори]
+🎯 Оцінка: 🟢 BUY / 🔴 SELL / 🟡 WAIT
+📝 Пояснення: [1-2 речення]
+
+Важливо: це оцінка статичного зображення, не прогноз у реальному часі. Не вигадуй чисел,
+індикаторів або відсотків упевненості. Якщо сигнал неоднозначний, графік погано видно,
+свічка незакрита або недостатньо даних — WAIT. Не обіцяй прибуток.
+Наприкінці додай: «⚠️ Скриншот не гарантує напрямку наступної свічки. OTC має високий ризик.»'''
 
 
-def menu():
-    rows = [[InlineKeyboardButton(name, callback_data=f'pair:{symbol}')] for name, symbol in SYMBOLS.items()]
-    rows.append([InlineKeyboardButton('OTC (джерело даних недоступне)', callback_data='otc')])
-    return InlineKeyboardMarkup(rows)
-
-
-def signal_button(symbol):
-    return InlineKeyboardMarkup([[InlineKeyboardButton('🔎 ОТРИМАТИ СИГНАЛ', callback_data=f'analyze:{symbol}')],
-                                 [InlineKeyboardButton('↩️ Інша пара', callback_data='menu')]])
-
-
-def candles(symbol):
-    response = requests.get('https://api.binance.com/api/v3/klines',
-                            params={'symbol': symbol, 'interval': '1m', 'limit': 120}, timeout=12)
-    response.raise_for_status()
-    data = response.json()
-    if not isinstance(data, list) or len(data) < 50:
-        raise ValueError('Недостатньо свічок для аналізу')
-    # Остання свічка може бути незавершеною — виключаємо її.
-    closed = [x for x in data if int(x[6]) <= int(datetime.now(timezone.utc).timestamp() * 1000)]
-    if len(closed) < 40:
-        raise ValueError('Недостатньо закритих свічок')
-    return pd.Series([float(x[4]) for x in closed], dtype='float64')
-
-
-def analyze(symbol):
-    close = candles(symbol)
-    ema9 = close.ewm(span=9, adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    delta = close.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
-    rsi = 100 - 100 / (1 + gain.iloc[-1] / max(loss.iloc[-1], 1e-12))
-    macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    macd_signal = macd.ewm(span=9, adjust=False).mean()
-    upward = ema9.iloc[-1] > ema21.iloc[-1] and macd.iloc[-1] > macd_signal.iloc[-1] and 50 < rsi < 70
-    downward = ema9.iloc[-1] < ema21.iloc[-1] and macd.iloc[-1] < macd_signal.iloc[-1] and 30 < rsi < 50
-    label = '🟢 BUY / КУПИТИ' if upward else '🔴 SELL / ПРОДАТИ' if downward else '🟡 WAIT / ОЧІКУВАТИ'
-    return (f'📊 {symbol} · 1 хвилина\n\n{label}\n\n'
-            f'Ціна останньої закритої свічки: {close.iloc[-1]:,.4f} USDT\n'
-            f'EMA 9: {ema9.iloc[-1]:,.4f}\nEMA 21: {ema21.iloc[-1]:,.4f}\n'
-            f'RSI 14: {rsi:.1f}\nMACD: {macd.iloc[-1]:.5f}\n\n'
-            'Це технічний сигнал, а не гарантія результату. '
-            'Однохвилинні прогнози мають високий ризик помилки.')
+def analyze_image(image_bytes: bytes) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError('OPENAI_API_KEY is not configured')
+    encoded = base64.b64encode(image_bytes).decode('ascii')
+    payload = {
+        'model': MODEL,
+        'max_tokens': 550,
+        'messages': [{'role': 'user', 'content': [
+            {'type': 'text', 'text': PROMPT},
+            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}', 'detail': 'high'}}
+        ]}]
+    }
+    response = requests.post('https://api.openai.com/v1/chat/completions',
+        headers={'Authorization': f'Bearer {OPENAI_API_KEY}', 'Content-Type': 'application/json'},
+        json=payload, timeout=75)
+    if not response.ok:
+        LOG.error('Vision API status: %s', response.status_code)
+        raise RuntimeError(f'Vision API HTTP {response.status_code}')
+    return response.json()['choices'][0]['message']['content']
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🟢 PROFITOLOGY ANALYTICS\nОберіть актив для аналізу:', reply_markup=menu())
+    await update.message.reply_text('📸 PROFITOLOGY ANALYTICS\nНадішліть скриншот графіка Pocket Option як фото або файл. Я автоматично підготую технічну оцінку.')
 
 
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    value = query.data
-    if value == 'menu':
-        await query.edit_message_text('Оберіть актив:', reply_markup=menu())
-    elif value == 'otc':
-        await query.edit_message_text('⚠️ OTC: перевіреного потоку котирувань Pocket Option немає. '
-                                      'Не створюємо вигаданих сигналів.', reply_markup=menu())
-    elif value.startswith('pair:'):
-        symbol = value.split(':', 1)[1]
-        if symbol in SYMBOLS.values():
-            await query.edit_message_text(f'📈 {symbol}\nТаймфрейм: 1 хвилина', reply_markup=signal_button(symbol))
-    elif value.startswith('analyze:'):
-        symbol = value.split(':', 1)[1]
-        if symbol not in SYMBOLS.values():
+async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    await msg.reply_text('🔎 Аналізую зображення, зачекайте...')
+    try:
+        if msg.photo:
+            file = await msg.photo[-1].get_file()
+        elif msg.document and msg.document.mime_type in ('image/jpeg', 'image/png', 'image/webp'):
+            if msg.document.file_size and msg.document.file_size > 8_000_000:
+                await msg.reply_text('⚠️ Файл завеликий. Надішліть зображення до 8 МБ.')
+                return
+            file = await msg.document.get_file()
+        else:
+            await msg.reply_text('Надішліть зображення JPG, PNG або WebP.')
             return
-        try:
-            import asyncio
-            result = await asyncio.to_thread(analyze, symbol)
-        except Exception as exc:
-            LOG.warning('Market data error: %s', exc)
-            result = '⚠️ Не вдалося отримати ринкові дані. Спробуйте пізніше.'
-        await query.edit_message_text(result, reply_markup=signal_button(symbol))
+        buf = BytesIO()
+        await file.download_to_memory(out=buf)
+        raw = buf.getvalue()
+        if len(raw) > 8_000_000:
+            await msg.reply_text('⚠️ Зображення завелике. Стисніть його до 8 МБ.')
+            return
+        # Telegram photos are JPEG; files may be PNG/WebP, whose MIME type is passed through.
+        if msg.document and msg.document.mime_type != 'image/jpeg':
+            from PIL import Image
+            image = Image.open(BytesIO(raw)).convert('RGB')
+            output = BytesIO()
+            image.save(output, format='JPEG', quality=88)
+            raw = output.getvalue()
+        result = await asyncio.to_thread(analyze_image, raw)
+        await msg.reply_text(result[:4000])
+    except Exception as exc:
+        LOG.warning('Screenshot analysis failed: %s', type(exc).__name__)
+        await msg.reply_text('⚠️ Не вдалося проаналізувати зображення. Перевірте налаштування API та журнал Render.')
 
 
 def main():
     if not TOKEN:
-        raise RuntimeError('Задайте TELEGRAM_BOT_TOKEN як змінну середовища; не вставляйте токен у код.')
+        raise RuntimeError('Missing TELEGRAM_BOT_TOKEN')
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.run_webhook(
-    listen="0.0.0.0",
-    port=int(os.environ.get("PORT", "10000")),
-    url_path="telegram",
-    webhook_url=os.environ["RENDER_EXTERNAL_URL"].rstrip("/") + "/telegram",
-    drop_pending_updates=True,
-)
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, photo))
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == '__main__':
