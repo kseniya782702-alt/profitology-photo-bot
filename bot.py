@@ -3,6 +3,8 @@ import asyncio
 import io
 import logging
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
 import numpy as np
@@ -96,9 +98,32 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text('⚠️ Не вдалося прочитати зображення. Спробуйте надіслати PNG або JPG.')
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path not in ('/', '/health'):
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b'PROFITOLOGY service running\n'
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    port = int(os.getenv('PORT', '10000'))
+    server = ThreadingHTTPServer(('0.0.0.0', port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    LOG.warning('Health endpoint listening on port %s', port)
+
 def main():
     if not TOKEN:
         raise RuntimeError('Set TELEGRAM_BOT_TOKEN in environment')
+    start_health_server()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, photo))
