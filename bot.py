@@ -1,96 +1,104 @@
-"""PROFITOLOGY ANALYTICS: screenshot analysis for Pocket Option charts."""
+"""PROFITOLOGY ANALYTICS — free, heuristic screenshot analysis (not a trading predictor)."""
 import asyncio
-import base64
+import io
 import logging
 import os
-from io import BytesIO
 
-import requests
+import cv2
+import numpy as np
+from PIL import Image, ImageOps
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-logging.basicConfig(level=logging.INFO)
-LOG = logging.getLogger(__name__)
-TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-MODEL = os.environ.get('VISION_MODEL', 'gpt-4.1-mini')
-PROMPT = '''Проаналізуй надісланий скриншот торгового графіка Pocket Option українською.
-Поверни стислий звіт у форматі:
-📊 Актив: [назва або не видно]
-⏱ Таймфрейм: [або не видно]
-📈 Тренд: [висхідний/спадний/боковий/невизначений]
-🔎 Спостереження: [2-4 конкретні ознаки, які справді видно: свічки, середні, рівні, індикатори]
-🎯 Оцінка: 🟢 BUY / 🔴 SELL / 🟡 WAIT
-📝 Пояснення: [1-2 речення]
-
-Важливо: це оцінка статичного зображення, не прогноз у реальному часі. Не вигадуй чисел,
-індикаторів або відсотків упевненості. Якщо сигнал неоднозначний, графік погано видно,
-свічка незакрита або недостатньо даних — WAIT. Не обіцяй прибуток.
-Наприкінці додай: «⚠️ Скриншот не гарантує напрямку наступної свічки. OTC має високий ризик.»'''
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+LOG = logging.getLogger('profitology')
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
 
-def analyze_image(image_bytes: bytes) -> str:
-    if not OPENAI_API_KEY:
-        raise RuntimeError('OPENAI_API_KEY is not configured')
-    encoded = base64.b64encode(image_bytes).decode('ascii')
-    payload = {
-        'model': MODEL,
-        'max_tokens': 550,
-        'messages': [{'role': 'user', 'content': [
-            {'type': 'text', 'text': PROMPT},
-            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}', 'detail': 'high'}}
-        ]}]
-    }
-    response = requests.post('https://api.openai.com/v1/chat/completions',
-        headers={'Authorization': f'Bearer {OPENAI_API_KEY}', 'Content-Type': 'application/json'},
-        json=payload, timeout=75)
-    if not response.ok:
-        LOG.error('Vision API status: %s', response.status_code)
-        raise RuntimeError(f'Vision API HTTP {response.status_code}')
-    return response.json()['choices'][0]['message']['content']
+def analyze_image(raw: bytes) -> str:
+    im = Image.open(io.BytesIO(raw))
+    im = ImageOps.exif_transpose(im).convert('RGB')
+    im.thumbnail((1200, 1200))
+    rgb = np.asarray(im)
+    h, w = rgb.shape[:2]
+    if h < 220 or w < 220:
+        return '🟡 ЧЕКАТИ\nЗображення надто мале для оцінки. Надішліть чіткий скриншот графіка.'
+
+    # Central upper region usually contains the candlestick chart, but UI layouts vary.
+    roi = rgb[int(h * .12):int(h * .65), int(w * .08):int(w * .94)]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
+    # Identify vivid green and red chart marks. Exclude low-saturation UI text/background.
+    green = cv2.inRange(hsv, (35, 80, 75), (90, 255, 255))
+    red = cv2.bitwise_or(cv2.inRange(hsv, (0, 90, 75), (12, 255, 255)),
+                         cv2.inRange(hsv, (165, 90, 75), (179, 255, 255)))
+    # Ignore small colored artifacts, and count only vertical-ish connected components.
+    def components(mask):
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+        found = []
+        for i in range(1, count):
+            x, y, cw, ch, area = stats[i]
+            if 4 <= cw <= roi.shape[1] * .09 and 5 <= ch <= roi.shape[0] * .35 and area >= 14 and ch >= cw * .7:
+                found.append((x + cw / 2, y + ch / 2, area))
+        return found
+    greens = components(green)
+    reds = components(red)
+    all_marks = [(x, y, 1) for x, y, _ in greens] + [(x, y, -1) for x, y, _ in reds]
+    # If not enough distinct marks, abstain. Never imply accurate candle recognition.
+    if len(all_marks) < 7:
+        return ('🟡 ЧЕКАТИ\nНе вдалося впевнено відокремити свічки від інших елементів.\n'
+                'Надішліть скриншот без зайвих панелей, щоб було видно 20–30 свічок.')
+    all_marks.sort(key=lambda p: p[0])
+    # Require marks spread over a meaningful width; colored indicators can otherwise mislead.
+    xs = [m[0] for m in all_marks]
+    if max(xs) - min(xs) < roi.shape[1] * .25:
+        return '🟡 ЧЕКАТИ\nНа зображенні недостатньо розбірливих свічок для оцінки.'
+    recent = all_marks[-max(5, len(all_marks) // 3):]
+    n_green = sum(1 for _, _, c in recent if c == 1)
+    n_red = len(recent) - n_green
+    # Heuristic color balance only; cannot infer trade outcome.
+    tendency = ('переважають зелені елементи' if n_green > n_red * 1.5 else
+                'переважають червоні елементи' if n_red > n_green * 1.5 else
+                'немає явної переваги кольору')
+    return (f'📊 PROFITOLOGY ANALYTICS\n\n🟡 ЧЕКАТИ\n'
+            f'На правій частині видимого графіка {tendency}.\n'
+            'Це лише приблизний аналіз кольорових елементів скриншота, а не підтверджений сигнал. '
+            'Алгоритм може сплутати свічки з індикаторами та кнопками.\n\n'
+            '⚠️ Немає живих котирувань Pocket Option, зокрема OTC. '
+            'За одним зображенням не можна надійно передбачити наступну свічку.')
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('📸 PROFITOLOGY ANALYTICS\nНадішліть скриншот графіка Pocket Option як фото або файл. Я автоматично підготую технічну оцінку.')
+    await update.message.reply_text(
+        '📊 PROFITOLOGY ANALYTICS\nНадішліть скриншот графіка Pocket Option (OTC, валюти або крипто). '
+        'Я безкоштовно оціню видимі елементи графіка. Це не торговий сигнал.')
 
 
 async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    await msg.reply_text('🔎 Аналізую зображення, зачекайте...')
+    await msg.reply_text('🔎 Аналізую скриншот…')
     try:
         if msg.photo:
-            file = await msg.photo[-1].get_file()
-        elif msg.document and msg.document.mime_type in ('image/jpeg', 'image/png', 'image/webp'):
-            if msg.document.file_size and msg.document.file_size > 8_000_000:
-                await msg.reply_text('⚠️ Файл завеликий. Надішліть зображення до 8 МБ.')
-                return
-            file = await msg.document.get_file()
+            file_id = msg.photo[-1].file_id
+        elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith('image/'):
+            file_id = msg.document.file_id
         else:
-            await msg.reply_text('Надішліть зображення JPG, PNG або WebP.')
             return
-        buf = BytesIO()
-        await file.download_to_memory(out=buf)
-        raw = buf.getvalue()
-        if len(raw) > 8_000_000:
-            await msg.reply_text('⚠️ Зображення завелике. Стисніть його до 8 МБ.')
+        f = await context.bot.get_file(file_id)
+        if f.file_size and f.file_size > 8_000_000:
+            await msg.reply_text('🟡 ЧЕКАТИ\nЗображення завелике. Надішліть файл до 8 МБ.')
             return
-        # Telegram photos are JPEG; files may be PNG/WebP, whose MIME type is passed through.
-        if msg.document and msg.document.mime_type != 'image/jpeg':
-            from PIL import Image
-            image = Image.open(BytesIO(raw)).convert('RGB')
-            output = BytesIO()
-            image.save(output, format='JPEG', quality=88)
-            raw = output.getvalue()
+        raw = bytes(await f.download_as_bytearray())
         result = await asyncio.to_thread(analyze_image, raw)
-        await msg.reply_text(result[:4000])
-    except Exception as exc:
-        LOG.warning('Screenshot analysis failed: %s', type(exc).__name__)
-        await msg.reply_text('⚠️ Не вдалося проаналізувати зображення. Перевірте налаштування API та журнал Render.')
+        await msg.reply_text(result)
+    except Exception:
+        LOG.exception('Screenshot processing error')
+        await msg.reply_text('⚠️ Не вдалося прочитати зображення. Спробуйте надіслати PNG або JPG.')
 
 
 def main():
     if not TOKEN:
-        raise RuntimeError('Missing TELEGRAM_BOT_TOKEN')
+        raise RuntimeError('Set TELEGRAM_BOT_TOKEN in environment')
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, photo))
