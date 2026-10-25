@@ -96,7 +96,13 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CallbackQueryHandler(callback))
-    app.run_polling()
+    app.run_webhook(
+    listen="0.0.0.0",
+    port=int(os.environ.get("PORT", "10000")),
+    url_path="telegram",
+    webhook_url=os.environ["RENDER_EXTERNAL_URL"].rstrip("/") + "/telegram",
+    drop_pending_updates=True,
+)
 
 
 if __name__ == '__main__':
