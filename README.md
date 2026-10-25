@@ -1,14 +1,16 @@
-# PROFITOLOGY-style Photo Bot (prototype)
+# PROFITOLOGY ANALYTICS — Telegram бот
 
-Mobile-friendly Streamlit interface inspired by screenshots. Not affiliated with PROFITOLOGY or Pocket Option.
+Україномовний Telegram-бот з кнопкою «Отримати сигнал». Аналізує **реальні** BTC/USDT, ETH/USDT, SOL/USDT та BNB/USDT на 1-хвилинних закритих свічках Binance за EMA9/EMA21, RSI14 і MACD. Показує BUY/SELL/WAIT. Це технічний індикатор, не гарантія прибутку.
 
-## Run
-```
-pip install -r requirements.txt
-streamlit run app.py
-```
+**OTC Pocket Option:** котирування не підключені. Бот прямо повідомляє про відсутність даних і не вигадує сигнали. Автоматичної торгівлі та інтеграції з рахунком немає.
 
-Deploy on Streamlit Community Cloud by uploading `app.py` and `requirements.txt` to a GitHub repository, then deploying the repository. Open the URL in Android Chrome and choose Add to Home screen.
+## Встановлення
 
-## Important limitations
-The app accepts screenshots and displays them, but **does not automatically read candlesticks or generate image-derived trade signals**. It uses explicitly selected chart observations to issue conditional BUY/SELL/WAIT suggestions. It does not access Pocket Option OTC quotes or place trades. No claimed win rate or guaranteed prediction accuracy. History lasts only for the browser session.
+1. Завантажте `bot.py` та `requirements.txt` до репозиторію GitHub (не завантажуйте секретні токени).
+2. Для безперервної роботи потрібен Python-хостинг, який підтримує **постійний фоновий процес** (наприклад, worker). Streamlit Community Cloud для такого Telegram polling-бота не підходить.
+3. На сервері виконайте `pip install -r requirements.txt`.
+4. У захищених змінних середовища сервера створіть `TELEGRAM_BOT_TOKEN` і вставте туди токен з BotFather. Не надсилайте токен у чат.
+5. Команда запуску: `python bot.py`.
+6. Відкрийте свого Telegram-бота і надішліть `/start`.
+
+Якщо Binance API недоступний із вашого сервера, бот покаже повідомлення про помилку, а не сфабрикований сигнал.
