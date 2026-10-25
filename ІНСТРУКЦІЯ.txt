@@ -1,0 +1,23 @@
+PROFITOLOGY ANALYTICS — ФІНАЛЬНА БЕЗКОШТОВНА ВЕРСІЯ
+
+1. Розпакуйте архів.
+2. GitHub -> profitology-photo-bot -> Add file -> Upload files.
+3. Завантажте bot.py та requirements.txt у корінь репозиторію, підтвердьте заміну і Commit changes.
+4. Render -> Settings:
+   Build Command: pip install -r requirements.txt
+   Start Command: python bot.py
+5. Render -> Environment: TELEGRAM_BOT_TOKEN повинен містити новий токен, створений у BotFather.
+   OPENAI_API_KEY для цієї версії не потрібний; його можна видалити з Render.
+6. Дочекайтеся Deploy -> Live. Перевірте /start та надішліть чіткий скриншот у Telegram.
+7. Render Free Web Service засинає без зовнішніх HTTP-запитів. Telegram polling сам по собі
+   не гарантує, що сервіс залишиться активним. Цілодобова робота не гарантована.
+
+ОБОВ'ЯЗКОВО: попередній токен Telegram потрапив на скриншоти журналу.
+У BotFather відкличте його, створіть новий та оновіть TELEGRAM_BOT_TOKEN у Render.
+Не надсилайте токен і не публікуйте журнали з ним.
+
+МЕЖІ АНАЛІЗУ:
+- Немає API Pocket Option, OTC-котирувань або прогнозу наступної свічки.
+- Евристика OpenCV може сплутати свічки, лінії індикаторів та елементи інтерфейсу.
+- Результат — лише візуальний опис та «ЧЕКАТИ», не рекомендація для угоди.
+- Для найкращого результату надсилайте чіткий скриншот з 20–40 свічками.
